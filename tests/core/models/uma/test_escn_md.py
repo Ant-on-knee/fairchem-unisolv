@@ -189,6 +189,72 @@ def test_escnmd_backbone_with_solvent_embedding():
     assert torch.isfinite(out["node_embedding"]).all()
 
 
+def test_solvent_surgery_preserves_predictions():
+    """Transplanting a solvent-free backbone's weights into a solvent-enabled
+    one via the surgery's mix_csd widening (zeroed solvent columns) leaves the
+    forward pass numerically unchanged -- the property add_solvent_embedding
+    relies on to upgrade pretrained checkpoints without changing predictions."""
+    from fairchem.core.scripts.add_solvent_embedding import _expand_mix_csd_weight
+
+    kwargs = dict(
+        max_num_elements=100,
+        sphere_channels=4,
+        lmax=2,
+        mmax=2,
+        otf_graph=True,
+        edge_channels=5,
+        num_distance_basis=7,
+        use_dataset_embedding=False,
+        always_use_pbc=False,
+    )
+
+    torch.manual_seed(0)
+    ref = eSCNMDBackbone(use_solvent_embedding=False, **kwargs).eval()
+
+    solv = eSCNMDBackbone(
+        use_solvent_embedding=True, solvent_emb_hidden=8, **kwargs
+    ).eval()
+
+    # Transplant ref's weights into solv: widen mix_csd (zero solvent columns),
+    # keep solv's freshly-initialized solvent_embedding.
+    new_sd = dict(ref.state_dict())
+    new_sd["mix_csd.weight"] = _expand_mix_csd_weight(
+        ref.state_dict()["mix_csd.weight"], ref.sphere_channels
+    )
+    new_sd.update(
+        {
+            key: value
+            for key, value in solv.state_dict().items()
+            if key.startswith("solvent_embedding.")
+        }
+    )
+    solv.load_state_dict(new_sd)
+
+    atoms = get_molecule("H2O")
+    g_ref = AtomicData.from_ase(
+        input_atoms=atoms,
+        max_neigh=25,
+        radius=12,
+        task_name="solvent_test",
+        r_edges=False,
+        r_data_keys=["spin", "charge"],
+    )
+    atoms_solv = atoms.copy()
+    atoms_solv.info["solvent"] = "water"
+    g_solv = AtomicData.from_ase(
+        input_atoms=atoms_solv,
+        max_neigh=25,
+        radius=12,
+        task_name="solvent_test",
+        r_edges=False,
+        r_data_keys=["spin", "charge", "solvent"],
+    )
+
+    out_ref = ref(g_ref)["node_embedding"]
+    out_solv = solv(g_solv)["node_embedding"]
+    assert torch.allclose(out_ref, out_solv, atol=1e-6)
+
+
 def test_resolve_dataset_mapping_valid_mapping():
     mapping = {"oc20": "oc20", "oc20_subset": "oc20"}
     result = resolve_dataset_mapping(deprecated_list=None, dataset_mapping=mapping)
