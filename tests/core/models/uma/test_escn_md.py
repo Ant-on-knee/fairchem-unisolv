@@ -17,7 +17,11 @@ from e3nn.math import direct_sum
 from e3nn.o3 import matrix_to_angles, spherical_harmonics, wigner_D
 
 from fairchem.core.datasets.atomic_data import AtomicData
-from fairchem.core.models.uma.escn_md import eSCNMDBackbone, resolve_dataset_mapping
+from fairchem.core.models.uma.escn_md import (
+    MLP_EFS_Head,
+    eSCNMDBackbone,
+    resolve_dataset_mapping,
+)
 
 
 @pytest.mark.parametrize(
@@ -187,6 +191,65 @@ def test_escnmd_backbone_with_solvent_embedding():
     out = backbone(g)
     assert out["node_embedding"].shape[0] == len(atoms)
     assert torch.isfinite(out["node_embedding"]).all()
+
+
+def _solvent_gate_model(solvent_output_gate: bool):
+    torch.manual_seed(42)
+    backbone = eSCNMDBackbone(
+        max_num_elements=100,
+        sphere_channels=4,
+        lmax=2,
+        mmax=2,
+        otf_graph=True,
+        edge_channels=5,
+        num_distance_basis=7,
+        use_dataset_embedding=False,
+        use_solvent_embedding=True,
+        solvent_emb_hidden=8,
+        solvent_output_gate=solvent_output_gate,
+        always_use_pbc=False,
+        direct_forces=False,  # autograd forces, as in the trained checkpoints
+    )
+    return backbone, MLP_EFS_Head(backbone)
+
+
+def _solvent_gate_forward(backbone, head, solvent: str):
+    atoms = get_molecule("H2O")
+    atoms.info["solvent"] = solvent
+    g = AtomicData.from_ase(
+        input_atoms=atoms,
+        max_neigh=25,
+        radius=12,
+        task_name="solvent_test",
+        r_edges=False,
+        r_data_keys=["spin", "charge", "solvent"],
+    )
+    g["pos"].requires_grad_(True)
+    out = head(g, backbone(g))
+    return out["energy"]["energy"], out["forces"]["forces"]
+
+
+def test_solvent_output_gate_vacuum_is_exactly_zero():
+    """With solvent_output_gate=True, a vacuum input yields energy AND forces
+    that are exactly zero (not just small) on a randomly initialized model,
+    while a real solvent still produces a nonzero prediction."""
+    backbone, head = _solvent_gate_model(solvent_output_gate=True)
+    e_vac, f_vac = _solvent_gate_forward(backbone, head, solvent="")
+    assert e_vac.abs().max().item() == 0.0
+    assert f_vac.abs().max().item() == 0.0
+
+    e_wat, f_wat = _solvent_gate_forward(backbone, head, solvent="water")
+    assert e_wat.abs().max().item() > 0.0
+    assert f_wat.abs().max().item() > 0.0
+
+
+def test_solvent_output_gate_off_is_unchanged():
+    """With the flag off (default), vacuum output is the usual nonzero
+    extrapolation — the gate must not alter existing behavior."""
+    backbone, head = _solvent_gate_model(solvent_output_gate=False)
+    e_vac, f_vac = _solvent_gate_forward(backbone, head, solvent="")
+    assert e_vac.abs().max().item() > 0.0
+    assert f_vac.abs().max().item() > 0.0
 
 
 def test_resolve_dataset_mapping_valid_mapping():

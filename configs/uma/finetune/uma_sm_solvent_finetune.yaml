@@ -114,6 +114,10 @@ runner:
           use_solvent_embedding: True
           solvent_emb_grad: True
           solvent_emb_hidden: ${solvent_emb_hidden}
+          # gate predicted energy/forces by the solvent-present mask so vacuum
+          # input -> exactly zero delta (gas-phase rows become zero-loss no-ops;
+          # they are not needed in the train split)
+          solvent_output_gate: True
         pass_through_head_outputs: ${data.pass_through_head_outputs}
       heads: ${data.heads}
     optimizer_fn:

@@ -64,15 +64,26 @@ def test_baked_stats_match_json():
     """The baked _SOLVENT_STATS must stay in sync with solvent_descriptors.json."""
     recomputed = _recompute_stats()
     for name in SOLVENT_DESCRIPTOR_ORDER:
-        for field in ("mean", "std"):
-            assert recomputed[name][field] == pytest.approx(
-                _SOLVENT_STATS[name][field], abs=1e-5
-            )
-        assert recomputed[name]["log"] == _SOLVENT_STATS[name]["log"]
+        assert recomputed[name]["scale"] == pytest.approx(
+            _SOLVENT_STATS[name]["scale"], abs=1e-5
+        )
+        assert recomputed[name]["transform"] == _SOLVENT_STATS[name]["transform"]
 
 
-def test_normalized_columns_are_standardized():
-    """Every normalized descriptor column has population mean 0 and std 1."""
+def test_encoding_is_vacuum_anchored():
+    """The physical gas phase maps to exactly 0 in every descriptor channel.
+
+    Vacuum raw values: n=1 (shift1 transform), epsilon=1 (log transform), all
+    other descriptors 0 (linear). No mean subtraction may reintroduce an offset.
+    """
+    vacuum_raw = [
+        1.0 if name in ("n", "epsilon") else 0.0 for name in SOLVENT_DESCRIPTOR_ORDER
+    ]
+    assert normalize(vacuum_raw) == [0.0] * len(SOLVENT_DESCRIPTOR_ORDER)
+
+
+def test_normalized_columns_are_unit_scale():
+    """Every normalized descriptor column has population std 1 (no centering)."""
     solvents = _load_raw()["solvents"]
     cols = [[] for _ in SOLVENT_DESCRIPTOR_ORDER]
     for s in solvents.values():
@@ -82,12 +93,28 @@ def test_normalized_columns_are_standardized():
     for col in cols:
         mean = sum(col) / len(col)
         var = sum((v - mean) ** 2 for v in col) / len(col)
-        # The baked _SOLVENT_STATS are stored to ~6 decimals, so the
-        # population mean of normalized columns has rounding residue on the
-        # order of (1e-6 / std) ~ 1e-5. The looser bound here still confirms
-        # the columns are effectively zero-mean.
-        assert mean == pytest.approx(0.0, abs=1e-4)
+        # The baked scales are stored to ~6 decimals, hence the loose bound.
         assert var == pytest.approx(1.0, abs=1e-4)
+
+
+def test_water_spot_values():
+    """Water lands where transform(raw)/scale says it should."""
+    import math
+
+    water = _load_raw()["solvents"]["water"]
+    vec = get_solvent_vector("water")[0]
+    i_n = SOLVENT_DESCRIPTOR_ORDER.index("n")
+    i_eps = SOLVENT_DESCRIPTOR_ORDER.index("epsilon")
+    i_gamma = SOLVENT_DESCRIPTOR_ORDER.index("gamma")
+    assert vec[i_n].item() == pytest.approx(
+        (water["n"] - 1.0) / _SOLVENT_STATS["n"]["scale"], rel=1e-5
+    )
+    assert vec[i_eps].item() == pytest.approx(
+        math.log(water["epsilon"]) / _SOLVENT_STATS["epsilon"]["scale"], rel=1e-5
+    )
+    assert vec[i_gamma].item() == pytest.approx(
+        water["gamma"] / _SOLVENT_STATS["gamma"]["scale"], rel=1e-5
+    )
 
 
 def test_normalize_wrong_length_raises():

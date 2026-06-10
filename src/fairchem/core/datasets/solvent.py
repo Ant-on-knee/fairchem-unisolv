@@ -36,20 +36,35 @@ SOLVENT_DESCRIPTOR_ORDER = [
 # mask.
 SOLVENT_DIM = len(SOLVENT_DESCRIPTOR_ORDER) + 1
 
-# Per-descriptor normalization statistics, computed once over all 179 solvents
-# in ``solvent_descriptors.json``. ``gamma`` and ``epsilon`` are right-skewed
-# physical quantities, so they are log-transformed before z-scoring. The
+# Per-descriptor vacuum-anchored normalization: ``transform(raw) / scale``, with
+# no mean subtraction, so the physical gas phase maps to exactly 0 in every
+# channel (the vacuum vector IS the descriptor-space origin, continuously
+# connected to the solvent manifold as eps -> 1 etc.). Transforms: ``epsilon``
+# is logged (solvation response saturates Born-like in eps; log(1) = 0 anchors
+# vacuum), ``n`` is shifted by its vacuum value of 1, everything else is linear
+# (raw vacuum values are already 0). Scales are the population std of the
+# transformed values over all 179 solvents in ``solvent_descriptors.json``. The
 # regression test ``test_solvent`` recomputes these from the JSON via
 # ``_recompute_stats`` and asserts they match, guarding against drift.
 _SOLVENT_STATS = {
-    "n": {"mean": 1.445501, "std": 0.068400, "log": False},
-    "alpha": {"mean": 0.094525, "std": 0.181746, "log": False},
-    "beta": {"mean": 0.308268, "std": 0.234892, "log": False},
-    "gamma": {"mean": 3.689254, "std": 0.250604, "log": True},
-    "epsilon": {"mean": 1.908964, "std": 0.960804, "log": True},
-    "aromaticity": {"mean": 0.184391, "std": 0.322355, "log": False},
-    "en-halogen": {"mean": 0.068223, "std": 0.174984, "log": False},
+    "n": {"transform": "shift1", "scale": 0.068400},
+    "alpha": {"transform": "linear", "scale": 0.181746},
+    "beta": {"transform": "linear", "scale": 0.234892},
+    "gamma": {"transform": "linear", "scale": 11.688257},
+    "epsilon": {"transform": "log", "scale": 0.960804},
+    "aromaticity": {"transform": "linear", "scale": 0.322355},
+    "en-halogen": {"transform": "linear", "scale": 0.174984},
 }
+
+
+def _transform(name: str, value: float) -> float:
+    """Apply a descriptor's vacuum-anchoring transform (0 at the gas phase)."""
+    transform = _SOLVENT_STATS[name]["transform"]
+    if transform == "shift1":
+        return float(value) - 1.0
+    if transform == "log":
+        return math.log(value)
+    return float(value)
 
 # Names that map to the vacuum / gas-phase null vector instead of a lookup.
 _VACUUM_NAMES = {"", "vacuum", "gas", "gas_phase", "gas-phase", "none"}
@@ -97,10 +112,11 @@ def list_solvents() -> list[str]:
 
 def normalize(raw_vec: Sequence[float]) -> list[float]:
     """
-    Normalize a raw solvent descriptor vector.
+    Normalize a raw solvent descriptor vector (vacuum-anchored).
 
-    Applies a log transform to the skewed descriptors, then z-scores every
-    descriptor using the baked ``_SOLVENT_STATS``.
+    Applies each descriptor's vacuum-anchoring transform, then divides by the
+    baked scale from ``_SOLVENT_STATS``. There is no mean subtraction: the
+    physical gas phase maps to exactly 0 in every channel.
 
     Args:
         raw_vec: Raw descriptor values in ``SOLVENT_DESCRIPTOR_ORDER`` order.
@@ -113,12 +129,10 @@ def normalize(raw_vec: Sequence[float]) -> list[float]:
             f"raw_vec must have {len(SOLVENT_DESCRIPTOR_ORDER)} values, "
             f"got {len(raw_vec)}"
         )
-    normed = []
-    for name, value in zip(SOLVENT_DESCRIPTOR_ORDER, raw_vec):
-        stats = _SOLVENT_STATS[name]
-        v = math.log(value) if stats["log"] else float(value)
-        normed.append((v - stats["mean"]) / stats["std"])
-    return normed
+    return [
+        _transform(name, value) / _SOLVENT_STATS[name]["scale"]
+        for name, value in zip(SOLVENT_DESCRIPTOR_ORDER, raw_vec)
+    ]
 
 
 def get_solvent_vector(solvent_name: str | None, strict: bool = True) -> torch.Tensor:
@@ -177,11 +191,9 @@ def _recompute_stats() -> dict:
     solvents = _load_raw()["solvents"]
     stats = {}
     for name in SOLVENT_DESCRIPTOR_ORDER:
-        log = _SOLVENT_STATS[name]["log"]
-        values = [
-            math.log(s[name]) if log else float(s[name]) for s in solvents.values()
-        ]
+        transform = _SOLVENT_STATS[name]["transform"]
+        values = [_transform(name, s[name]) for s in solvents.values()]
         mean = sum(values) / len(values)
         var = sum((v - mean) ** 2 for v in values) / len(values)
-        stats[name] = {"mean": mean, "std": math.sqrt(var), "log": log}
+        stats[name] = {"transform": transform, "scale": math.sqrt(var)}
     return stats

@@ -311,6 +311,7 @@ class eSCNMDBackbone(nn.Module, MOLEInterface):
         use_solvent_embedding: bool = False,
         solvent_emb_grad: bool = True,
         solvent_emb_hidden: int = 128,
+        solvent_output_gate: bool = False,
         use_cuda_graph_wigner: bool = False,
         use_quaternion_wigner: bool = True,
         radius_pbc_version: int = 2,
@@ -388,6 +389,9 @@ class eSCNMDBackbone(nn.Module, MOLEInterface):
         self.use_solvent_embedding = use_solvent_embedding
         self.solvent_emb_grad = solvent_emb_grad
         self.solvent_emb_hidden = solvent_emb_hidden
+        # Multiply predicted energy (and hence autograd forces) by the
+        # solvent-present mask, so vacuum input -> exactly zero delta.
+        self.solvent_output_gate = solvent_output_gate
         # rotation utils
         Jd_list = torch.load(os.path.join(os.path.dirname(__file__), "Jd.pt"))
         for l in range(self.lmax + 1):
@@ -1066,6 +1070,7 @@ class MLP_EFS_Head(nn.Module, HeadInterface):
         self.reduce = reduce
         self.prefix = prefix
         self.wrap_property = wrap_property
+        self.solvent_output_gate = getattr(backbone, "solvent_output_gate", False)
 
         self.sphere_channels = backbone.sphere_channels
         self.hidden_channels = backbone.hidden_channels
@@ -1101,6 +1106,15 @@ class MLP_EFS_Head(nn.Module, HeadInterface):
             natoms=data["natoms"],
             reduce=self.reduce,
         )
+
+        if self.solvent_output_gate:
+            # Gate the per-graph energy by the solvent-present mask (last channel
+            # of the solvent vector) BEFORE the autograd force computation, so
+            # vacuum systems get exactly zero energy AND forces while keeping
+            # F = -dE/dr consistent (the mask is constant w.r.t. positions).
+            mask = data["solvent"][:, -1].to(energy.dtype)
+            energy = energy * mask
+            energy_part = energy_part * mask
 
         outputs[energy_key] = {"energy": energy} if self.wrap_property else energy
 
